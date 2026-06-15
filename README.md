@@ -86,11 +86,11 @@ Benchmarks 6 regression models with 5-fold cross-validation.
 - Metrics: R², RMSE, MAE
 - Output: `data/d_model_comparison_results.csv`, `data/figure/`
 
-| Model | R² | RMSE | MAE |
-|---|---|---|---|
-| GradientBoosting | 0.890 | 0.927 | 0.736 |
+|  Model  |   R²  | RMSE  |  MAE  |
+|---------|-------|-------|-------|
+|    GB   | 0.890 | 0.927 | 0.736 |
 | XGBoost | 0.868 | 1.012 | 0.777 |
-| RandomForest | 0.859 | 1.049 | 0.810 |
+|    RF   | 0.859 | 1.049 | 0.810 |
 
 **`d_FeatureAnalysis.ipynb`**  
 Analyzes the top 5 most important features using GradientBoosting + SHAP.
@@ -157,19 +157,6 @@ Runs inference on a single new sample without ground truth.
 
 ---
 
-## Requirements
-
-```bash
-pip install torch torchvision opencv-python albumentations \
-            scikit-image scikit-learn xgboost shap \
-            matplotlib numpy pandas tqdm scipy
-```
-
-- Python 3.10+
-- CUDA-capable GPU recommended (CPU inference supported)
-
----
-
 ## Data
 
 Google Drive: [Download](https://drive.google.com/drive/folders/1xXJMeItTgxSiJEPIyLS20qiyQgB2hNEb?usp=sharing)
@@ -180,7 +167,7 @@ Place the downloaded folders inside `data/`.
 
 ## Notes
 
-- EDS filename suffixes: Mg=`01`, Al=`02`, Si=`03`, Cu=`06`, Fe=`07`, Sr=`09`
+- EDS filename suffixes: Mg=`01`, Al=`02`, Si=`03`, Ti=`04`, Mn=`05`, Fe=`06`, Cu=`07`, Zn=`08`, Sr=`09`
 - Area fractions: Al uses the full image area as denominator; all other elements use the MAP validity region.
 - `splits.json` is generated automatically during training and is shared across all evaluation and visualization scripts.
 - Image paths containing non-ASCII characters are handled by the `imread_korean()` utility function.
