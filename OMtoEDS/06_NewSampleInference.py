@@ -35,9 +35,9 @@ from matplotlib.lines import Line2D
 NEW_BASE_NAME = "0La_x500_0241"
 # NEW_BASE_NAME = "0La_x500_0420"
 
-OM_DIR   = r'.\pred_data\OM_hv'
-MAP_DIR  = r'.\pred_data\MAP_hv'
-RESULT_DIR = r'.\pred_data\result'
+OM_DIR   = r'.\data\pred_data\OM_hv'
+MAP_DIR  = r'.\data\pred_data\MAP_hv'
+RESULT_DIR = r'.\data\pred_data\result'
 
 MODEL_DIR  = os.path.join(r'.\result', 'tversky','models_tversky')
 OUTPUT_DIR = os.path.join(RESULT_DIR, 'new_sample_inference')
