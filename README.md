@@ -1,4 +1,4 @@
-# Hybrid AI Framework for Microstructure-Based Composition Reconstruction and Hardness Prediction of Al–Si Die-Casting Alloys
+# Hybrid Machine Learning Framework for Microstructure-Based Composition Reconstruction and Hardness Prediction of Al–Si Die-Casting Alloys
 
 Two independent analysis pipelines based on Optical Microscopy (OM) images:
 
