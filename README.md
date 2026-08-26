@@ -73,37 +73,47 @@ Extracts microstructure features from OM images and predicts Vickers hardness (H
 
 ### Script Descriptions
 
-**`a_FeatureExtraction.py`**  
+**`01_FeatureExtraction.py`**  
 Extracts microstructure features from OM images in parallel.
 
 - Input: `data/OM_hv/`, `data/a_hv.csv`
 - Output: `data/b_hv_with_features.csv`
 - Features: secondary phase, eutectic structure, dendrite orientation, DAS, GLCM texture, LBP
 
-**`b_DataFiltering.ipynb`**  
+**`02_DataFiltering.ipynb`**  
 Removes statistical outliers via Z-score analysis (threshold: 3.0).
 
 - Input: `data/b_hv_with_features.csv`
 - Output: `data/c_cleaned_hv_with_features.csv`
-- 529 samples → 448 samples (81 removed)
+- 529 samples → 449 samples (80 removed)
 
-**`c_ModelComparison.ipynb`**  
-Benchmarks 6 regression models with 5-fold cross-validation.
+**`03_FeatureSelectionCorr.ipynb`**  
+Reduces multicollinearity by detecting highly correlated feature pairs ($|r| \ge 0.95$) and dropping the feature with lower correlation to HV.
+- **Input:** `data/c_cleaned_hv_with_features.csv`
+- **Output:** `data/d_hv_with_corr_features.csv`
+- **Feature filtering:** 48 features → 42 features (6 collinear features removed)
 
-- Models: Ridge, Lasso, SVR, RandomForest, GradientBoosting, XGBoost
-- Metrics: R², RMSE, MAE
-- Output: `data/d_model_comparison_results.csv`, `data/figure/`
+**`04_ModelComparison.ipynb`**  
+Benchmarks 6 regression models with 5-fold cross-validation and performs Wilcoxon signed-rank tests for statistical validation.
+- **Models:** Ridge, Lasso, SVR, RandomForest, GradientBoosting, XGBoost
+- **Metrics:** $R^2$, RMSE, MAE
+- **Output:** `data/e_model_comparison_results.csv`, `data/figure/` (Actual vs. Predicted plots)
 
 |  Model  |   R²  | RMSE  |  MAE  |
 |---------|-------|-------|-------|
-|    GB   | 0.890 | 0.927 | 0.736 |
-| XGBoost | 0.868 | 1.012 | 0.777 |
-|    RF   | 0.859 | 1.049 | 0.810 |
+|    GB   | 0.873 | 1.004 | 0.762 |
+| XGBoost | 0.851 | 1.089 | 0.803 |
+|    RF   | 0.837 | 1.138 | 0.842 |
 
-**`d_FeatureAnalysis.ipynb`**  
-Analyzes the top 5 most important features using GradientBoosting + SHAP.
+**`05_ConformalPrediction.ipynb`**  
+Applies Cross-Validation Conformal Prediction to quantify prediction uncertainty (95% coverage interval) and saves the finalized deployment model.
+- **Input:** `data/d_hv_with_corr_features.csv`
+- **Output:** `data/f_ensemble_conformal_results.csv`, `data/figure_conformal/`, `data/figure_conformal/GradientBoosting_HV_prediction_model.pkl`
 
-- Output: `data/figure/gb_shap_summary_plot_top5.png`, `gb_shap_bar_plot_top5.png`
+**`06_FeatureAnalysis.ipynb`**  
+Interprets feature importance for the top Gradient Boosting model using SHAP TreeExplainer.
+- **Input:** `data/d_hv_with_corr_features.csv`
+- **Output:** `data/figure/gb_shap_summary_plot_top5.png`, `data/figure/gb_shap_bar_plot_top5.png`
 
 ---
 
@@ -116,61 +126,70 @@ Target elements: **Mg, Al, Si, Cu, Fe, Sr**
 ### Execution Order
 
 ```
-a_OMtoEDS_pix2pix.py                    ← Train models
-    → b_SpatialMapEvaluation_Separate.py ← Per-element evaluation
-    → c_SpatialMapEvaluation_Combined.py ← Combined evaluation
-    → d_AreaMetricsEvaluation.py         ← Area fraction metrics
-    → e_SpatialMapVisualization_YGB.py   ← Overlay visualization
-    → f_NewSampleInference.py            ← New sample inference
+      01_HyperparamGridSearch.py              ← Hyperparameter optimization
+    → 02_OMtoEDS_pix2pix_deep_ensemble.py     ← Deep Ensemble model training
+    → 03_SpatialMapEvaluation_Separate.py     ← Per-element quantitative evaluation
+    → 04_MultiElemOverlay.py                  ← Multi-element composite overlay
+    → 05_SpatialMapVisualization_YGB.py       ← Match/Miss/False qualitative visualization
+    → 06_UncertaintyMap.py                    ← Ensemble pixel uncertainty mapping
+    → 07_MicrostructureDescriptorAnalysis.py  ← Metallurgical descriptor (PSD & NND) validation
+    → 08_NewSampleInference.py                ← Inference on new unseen sample
 ```
 
 ### Script Descriptions
 
-**`a_OMtoEDS_pix2pix.py`**  
-Trains one GAN model per element.
+**`01_HyperparamGridSearch.py`**  
+Optimizes pixel-loss weighting ($\lambda_{\text{pix}}$), focal loss hyperparameters ($\alpha, \gamma$), and focal/Tversky loss ratios for representative elements.
+- **Input:** `data/OM/`, `data/EDS/`, `data/MASK/`, `data/MAP/`, `result/tversky/splits.json`
+- **Output:** `result/tversky/grid_search/grid_results_{elem}.csv`, `grid_search_best_params.csv`
+- **Ranking Criteria:** Minimum validation Mean Absolute Error (MAE) and Intersection over Union (IoU)
 
-- Input: `data/OM/`, `data/EDS/`, `data/MASK/`, `data/MAP/`
-- Output: `result/tversky/models_tversky/best_model_{elem}.pth`, `last_model_{elem}.pth`, `splits.json`
-- Architecture: U-Net (ResNet-34 encoder) + CBAM + Tversky/Focal Loss
-- Hyperparameters: 512×512 crop, batch=32, epochs=1000
+**`02_OMtoEDS_pix2pix_deep_ensemble.py`**
+Trains a Deep Ensemble ($N=3$ independently trained members per element) of Pix2Pix GANs[cite: 11].
+- **Input:** `data/OM/`, `data/EDS/`, `data/MASK/`, `data/MAP/`[cite: 11]
+- **Output:** `result/tversky/models_tversky/best_model_{elem}_{idx}_{epoch}.pth`, `last_model_{elem}_{idx}.pth`, `splits.json`
+- **Architecture:** U-Net Generator (ResNet-34 encoder + CBAM attention blocks in decoder) + PatchGAN Discriminator
+- **Loss:** Element-specific Tversky Loss + Focal Loss + GAN Adversarial Loss
+- **Hyperparameters:** $512 \times 512$ random crop, batch size = 32, epochs = 1001, $\text{Adam } (\text{lr}=2\times 10^{-4})$
 
-**`b_SpatialMapEvaluation_Separate.py`**  
-Evaluates best/last checkpoints per element on the test split.
+**`03_SpatialMapEvaluation_Separate.py`**
+Evaluates the test set across individual members, majority voting, and deep ensemble mean predictions for both `best` and `last` model checkpoints.
+- **Input:** `data/OM/`, `data/EDS/`, `data/MASK/`, `data/MAP/`, `result/tversky/splits.json`
+- **Output:** `result/test_tversky/results_per_sample.csv`, `results_area_summary.csv`, `vis_{elem}/`
+- **Metrics:** Sample-level IoU, Dice coefficient, Area fraction standard deviation, and scalar area-based RMSE(%p), MAE(%p), MAPE(%).
 
-- Metrics: IoU, Dice, RMSE(%p), MAE(%p), MAPE(%), R²
-- Output: `result/test_tversky/results_per_sample.csv`
+**`04_MultiElemOverlay.py`**
+Generates publication-quality composite multi-element spatial maps overlaid on faded OM grayscale backgrounds.
+- **Output:** `result/test_tversky/all_elems_{tag}/` (6 elements: Al, Si, Mg, Fe, Cu, Sr), `prec_elems_{tag}/` (4 precipitate elements: Mg, Fe, Cu, Sr)
+- **Features:** Distinct academic color palette with unified upper-left 2-column legends.
 
-**`c_SpatialMapEvaluation_Combined.py`**  
-Aggregates and compares best/last model results across all elements.
+**`05_SpatialMapVisualization_YGB.py`**
+Performs pixel-level classification error analysis with ensemble-agreement-weighted opacity.
+- **Classification Categories:** Match (True Positive, Green), Miss (False Negative, Yellow), False (False Positive, Red)
+- **Output:** `result/test_tversky/pure_mask_{elem}_{tag}/`
+- **Ensemble Opacity:** Alpha blending ($0.33 \rightarrow 1.0$) proportionally scaled to member vote counts.
 
-**`d_AreaMetricsEvaluation.py`**  
-Computes accuracy of predicted elemental area fractions.
+**`06_UncertaintyMap.py`** 
+Quantifies pixel-level epistemic uncertainty (standard deviation across ensemble members) and exports filtered uncertainty metrics.
+- **Output:** `result/test_tversky/uncertainty_maps/{tag}/{elem}/` (standalone heatmaps & OM overlays), `uncertainty_summary_filtered_{tag}.csv`
+- **Filtering:** Excludes background/zero-uncertainty regions ($\sigma \le 10^{-6}$) to compute mean uncertainty for precipitates vs. matrix.
 
-- Input: `result/test_tversky/results_per_sample.csv`
-- Output: `results_metrics_best.csv`, `results_metrics_last.csv`
-- Metrics: RMSE(%p), MAE(%p), R²
+**`07_MicrostructureDescriptorAnalysis.py`**
+Statistically validates metallurgical fidelity between Ground Truth and predicted microstructures.
+- **Evaluated Descriptors:**
+  - **Particle Size Distribution (PSD):** Connected-component area distributions for precipitate phases.
+  - **Cross-Element Nearest-Neighbor Distance (Cross-NND):** Spatial distances between all 6 pairwise combinations of precipitate elements (Mg, Fe, Cu, Sr).
+- **Metrics:** Kolmogorov-Smirnov (KS) test ($p$-value, statistic) and Wasserstein Distance.
+- **Output:** `result/test_tversky/metallurgical_descriptors_{tag}/` (pooled CSVs, summary tables, and GT vs. Pred histogram plots).
 
-**`e_SpatialMapVisualization_YGB.py`**  
-Overlays predictions on OM backgrounds for qualitative evaluation.
-
-- Match (TP) → Green, Miss (FN) → Yellow, False (FP) → Red
-- Output: `result/test_tversky/pure_mask_{elem}_{tag}/`
-
-**`f_NewSampleInference.py`**  
-Runs inference on a single new sample without ground truth.
-
-- Input: `pred_data/OM_hv/`, `pred_data/MAP_hv/`
-- Output: area fraction CSV + 6-element and 4-element overlay images
-- Set the target filename via `NEW_BASE_NAME` at the top of the script
-
----
-
-## Data
-
-Google Drive: [Download](https://drive.google.com/drive/folders/1xXJMeItTgxSiJEPIyLS20qiyQgB2hNEb?usp=sharing)
-
-Place the downloaded folders inside `data/`.
-
+**`07_NewSampleInference.py`**
+Executes end-to-end inference on a single new sample without Ground Truth masks.
+- **Input:** `data/pred_data/OM_hv/{NEW_BASE_NAME}.png`, `data/pred_data/MAP_hv/{NEW_BASE_NAME}.png`
+- **Output:** `data/pred_data/result/new_sample_inference/`
+  - Raw Area Ratio & 100% Normalized Area Ratio CSV (`mean ± std`)
+  - Text summary report (`_summary_report.txt`)
+  - 6-element (`_6elems_last_Pred.png`) and 4-precipitate (`_prec4_last_Pred.png`) overlay images
+- **Configuration:** Set target sample name via `NEW_BASE_NAME` at the top of the script.
 ---
 
 ## Notes
