@@ -12,12 +12,14 @@ Two independent analysis pipelines based on Optical Microscopy (OM) images:
 ```
 project/
 ├── OMtoEDS/
-│   ├── a_OMtoEDS_pix2pix.py
-│   ├── b_SpatialMapEvaluation_Separate.py
-│   ├── c_SpatialMapEvaluation_Combined.py
-│   ├── d_AreaMetricsEvaluation.py
-│   ├── e_SpatialMapVisualization_YGB.py
-│   ├── f_NewSampleInference.py
+│   ├── 01_HyperparamGridSearch.py
+│   ├── 02_OMtoEDS_pix2pix_deep_ensemble.py
+│   ├── 03_SpatialMapEvaluation_Separate.py
+│   ├── 04_MultiElemOverlay.py
+│   ├── 05_SpatialMapVisualization_YGB.py
+│   ├── 06_UncertaintyMap.py
+│   ├── 07_MicrostructureDescriptorAnalysis.py
+│   ├── 07_NewSampleInference.py
 │   ├── data/
 │        └── EDS
 │        ├── MAP
@@ -35,17 +37,21 @@ project/
 │       └── test_tversky/    # Evaluation CSVs and visualizations
 │
 ├── OMtoEDS/
-      ├── a_FeatureExtraction.py
-      ├── b_DataFiltering.ipynb
-      ├── c_ModelComparison.ipynb
-      └── d_FeatureAnalysis.ipynb
+      ├── 01_FeatureExtraction.py
+      ├── 02_DataFiltering.ipynb
+      ├── 03_FeatureSelectionCorr.ipynb
+      ├── 04_ModelComparison.ipynb
+      ├── 05_ConformalPrediction.ipynb
+      └── 06_FeatureAnalysis.ipynb
       ├── data/
            └── figure/
            ├── OM_hv/
            ├── a_hv.csv
            ├── b_hv_with_features.csv
            ├── c_cleaned_hv_with_features.csv
-           └── d_model_comparison_results.csv
+           ├── d_hv_with_corr_features.csv
+           ├── e_model_comparison_results.csv
+           └── f_ensemble_conformal_results.csv
 ```
 
 ---
@@ -57,10 +63,12 @@ Extracts microstructure features from OM images and predicts Vickers hardness (H
 ### Execution Order
 
 ```
-a_FeatureExtraction.py
-    → b_DataFiltering.ipynb
-    → c_ModelComparison.ipynb
-    → d_FeatureAnalysis.ipynb
+      01_FeatureExtraction.py
+    → 02_DataFiltering.ipynb
+    → 03_FeatureSelectionCorr.ipynb
+    → 04_ModelComparison.ipynb
+    → 05_ConformalPrediction.ipynb
+    → 06_FeatureAnalysis.ipynb
 ```
 
 ### Script Descriptions
