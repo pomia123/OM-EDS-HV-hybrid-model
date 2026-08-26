@@ -145,8 +145,8 @@ Optimizes pixel-loss weighting ($\lambda_{\text{pix}}$), focal loss hyperparamet
 - **Ranking Criteria:** Minimum validation Mean Absolute Error (MAE) and Intersection over Union (IoU)
 
 **`02_OMtoEDS_pix2pix_deep_ensemble.py`**
-Trains a Deep Ensemble ($N=3$ independently trained members per element) of Pix2Pix GANs[cite: 11].
-- **Input:** `data/OM/`, `data/EDS/`, `data/MASK/`, `data/MAP/`[cite: 11]
+Trains a Deep Ensemble ($N=3$ independently trained members per element) of Pix2Pix GANs.
+- **Input:** `data/OM/`, `data/EDS/`, `data/MASK/`, `data/MAP/`
 - **Output:** `result/tversky/models_tversky/best_model_{elem}_{idx}_{epoch}.pth`, `last_model_{elem}_{idx}.pth`, `splits.json`
 - **Architecture:** U-Net Generator (ResNet-34 encoder + CBAM attention blocks in decoder) + PatchGAN Discriminator
 - **Loss:** Element-specific Tversky Loss + Focal Loss + GAN Adversarial Loss
