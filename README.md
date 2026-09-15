@@ -36,22 +36,28 @@ project/
 │       ├── splits.json      # Train/val/test split info
 │       └── test_tversky/    # Evaluation CSVs and visualizations
 │
-├── OMtoEDS/
+├── OMtoHV/
       ├── 01_FeatureExtraction.py
-      ├── 02_DataFiltering.ipynb
-      ├── 03_FeatureSelectionCorr.ipynb
-      ├── 04_ModelComparison.ipynb
-      ├── 05_ConformalPrediction.ipynb
-      └── 06_FeatureAnalysis.ipynb
-      ├── data/
-           └── figure/
-           ├── OM_hv/
-           ├── a_hv.csv
+      ├── 02_ModelComparison.py
+      ├── 03_ConformalPrediction.py
+      ├── 04_FeatureAnalysis.py
+      └── data/
+           ├── OM_hv/                          # OM images (optionally in SPC{n}/ subfolders)
+           ├── a_hv.csv                        # SPECIMEN, FILE_NAME, HV
            ├── b_hv_with_features.csv
-           ├── c_cleaned_hv_with_features.csv
-           ├── d_hv_with_corr_features.csv
-           ├── e_model_comparison_results.csv
-           └── f_ensemble_conformal_results.csv
+           ├── c_model_comparison_results.csv
+           ├── c_per_fold_metrics.csv
+           ├── c_predictions_all_models.csv
+           ├── c_preprocessing_audit_log.csv
+           ├── c_feature_removal_pairs.csv
+           ├── d_conformal_results.csv
+           ├── d_conformal_per_fold.csv
+           ├── d_prediction_intervals.csv
+           ├── e_shap_feature_importance.csv
+           ├── e_shap_per_fold.csv
+           ├── figure/
+           ├── figure_conformal/
+           └── figure_shap/
 ```
 
 ---
@@ -64,56 +70,75 @@ Extracts microstructure features from OM images and predicts Vickers hardness (H
 
 ```
       01_FeatureExtraction.py
-    → 02_DataFiltering.ipynb
-    → 03_FeatureSelectionCorr.ipynb
-    → 04_ModelComparison.ipynb
-    → 05_ConformalPrediction.ipynb
-    → 06_FeatureAnalysis.ipynb
+    → 02_ModelComparison.py
+    → 03_ConformalPrediction.py
+    → 04_FeatureAnalysis.py
 ```
+
+### Validation Protocol (shared by 02–04)
+
+- **Leave-one-specimen-out (LOSO) group CV:** 4 folds, grouped by `SPECIMEN` (SPC1–SPC4 = 169 / 120 / 110 / 130 samples; 529 in total). In each fold, one specimen is held out and the models are trained on the remaining three.
+- **Per-fold preprocessing (training fold only):**
+  - Pearson collinearity screening ($|r| \ge 0.95$): for each highly correlated pair, the feature with the weaker correlation to HV is dropped.
+  - `StandardScaler` fitted on the training fold, then applied to the held-out fold.
+- **Hyperparameters:** fixed (no search).
+- All 529 samples are used (no outlier removal).
 
 ### Script Descriptions
 
 **`01_FeatureExtraction.py`**  
-Extracts microstructure features from OM images in parallel.
+Extracts microstructure features from OM images in parallel (`ProcessPoolExecutor`).
+- **Input:** `data/OM_hv/` (images in `SPC{n}/` subfolders are also supported), `data/a_hv.csv`
+- **Output:** `data/b_hv_with_features.csv` (529 samples, 48 features)
+- **Features:** secondary phase morphology, dendrite orientation, DAS, eutectic structure (fraction, lamella thickness, skeleton), GLCM texture, LBP, intensity statistics, autocorrelation length
+- **Visualization:** Feature maps for the first sample only are saved to `data/figure/`
 
-- Input: `data/OM_hv/`, `data/a_hv.csv`
-- Output: `data/b_hv_with_features.csv`
-- Features: secondary phase, eutectic structure, dendrite orientation, DAS, GLCM texture, LBP
-
-**`02_DataFiltering.ipynb`**  
-Removes statistical outliers via Z-score analysis (threshold: 3.0).
-
-- Input: `data/b_hv_with_features.csv`
-- Output: `data/c_cleaned_hv_with_features.csv`
-- 529 samples → 449 samples (80 removed)
-
-**`03_FeatureSelectionCorr.ipynb`**  
-Reduces multicollinearity by detecting highly correlated feature pairs ($|r| \ge 0.95$) and dropping the feature with lower correlation to HV.
-- **Input:** `data/c_cleaned_hv_with_features.csv`
-- **Output:** `data/d_hv_with_corr_features.csv`
-- **Feature filtering:** 48 features → 42 features (6 collinear features removed)
-
-**`04_ModelComparison.ipynb`**  
-Benchmarks 6 regression models with 5-fold cross-validation and performs Wilcoxon signed-rank tests for statistical validation.
-- **Models:** Ridge, Lasso, SVR, RandomForest, GradientBoosting, XGBoost
-- **Metrics:** $R^2$, RMSE, MAE
-- **Output:** `data/e_model_comparison_results.csv`, `data/figure/` (Actual vs. Predicted plots)
+**`02_ModelComparison.py`**  
+Benchmarks 6 regression models under LOSO group CV and performs Wilcoxon signed-rank tests on pooled absolute errors against the best model.
+- **Input:** `data/b_hv_with_features.csv`
+- **Models:** Ridge (α=1.0), Lasso (α=0.1), SVR (RBF, C=10), RandomForest (n_estimators=200), GradientBoosting (n_estimators=200), XGBoost (n_estimators=200, learning_rate=0.05)
+- **Metrics:** $R^2$, RMSE, MAE (pooled out-of-fold, plus per-fold mean ± SD)
+- **Output:**
+  - `data/c_model_comparison_results.csv`: summary and Wilcoxon p-values
+  - `data/c_per_fold_metrics.csv`: per-fold metrics
+  - `data/c_predictions_all_models.csv`: out-of-fold predictions
+  - `data/c_preprocessing_audit_log.csv`: per-fold retained/removed features, scaler fit scope
+  - `data/c_feature_removal_pairs.csv`: removed collinear pairs
+  - `data/figure/`: Actual vs. Predicted plots
 
 |  Model  |   R²  | RMSE  |  MAE  |
 |---------|-------|-------|-------|
-|    GB   | 0.873 | 1.004 | 0.762 |
-| XGBoost | 0.851 | 1.089 | 0.803 |
-|    RF   | 0.837 | 1.138 | 0.842 |
+|    GB   | 0.848 | 1.141 | 0.840 |
+| XGBoost | 0.838 | 1.180 | 0.858 |
+|    RF   | 0.816 | 1.257 | 0.884 |
 
-**`05_ConformalPrediction.ipynb`**  
-Applies Cross-Validation Conformal Prediction to quantify prediction uncertainty (95% coverage interval) and saves the finalized deployment model.
-- **Input:** `data/d_hv_with_corr_features.csv`
-- **Output:** `data/f_ensemble_conformal_results.csv`, `data/figure_conformal/`, `data/figure_conformal/GradientBoosting_HV_prediction_model.pkl`
+**`03_ConformalPrediction.py`**  
+Computes 95% prediction intervals with cross-conformal prediction based on out-of-fold residuals for GradientBoosting, XGBoost, and RandomForest. Point predictions follow the same LOSO protocol as `02`.
+- **Input:** `data/b_hv_with_features.csv`
+- **Calibration:** For each held-out specimen, the absolute out-of-fold residuals of the other three folds are pooled as the calibration set. The held-out specimen does not contribute to its own interval width.
+- **Interval:** $q_{\text{level}} = \lceil (n_{\text{cal}}+1)(1-\alpha) \rceil / n_{\text{cal}}$, with $\alpha = 0.05$. $\hat{q}$ is the $q_{\text{level}}$ empirical quantile of the calibration residuals, and each interval is the prediction $\pm \hat{q}$.
+- **Coverage:** Empirical coverage is evaluated per held-out fold and across all folds.
+- **Output:**
+  - `data/d_conformal_results.csv`: summary
+  - `data/d_conformal_per_fold.csv`: per-fold $\hat{q}$ and coverage
+  - `data/d_prediction_intervals.csv`: per-sample intervals
+  - `data/figure_conformal/`
 
-**`06_FeatureAnalysis.ipynb`**  
-Interprets feature importance for the top Gradient Boosting model using SHAP TreeExplainer.
-- **Input:** `data/d_hv_with_corr_features.csv`
-- **Output:** `data/figure/gb_shap_summary_plot_top5.png`, `data/figure/gb_shap_bar_plot_top5.png`
+|  Model  | CP Margin (HV, fold mean) | Empirical Coverage |
+|---------|---------------------------|--------------------|
+|    GB   | ±2.08                     | 95.27%             |
+| XGBoost | ±2.32                     | 95.09%             |
+|    RF   | ±2.60                     | 95.09%             |
+
+**`04_FeatureAnalysis.py`**  
+Interprets feature importance of Gradient Boosting using SHAP TreeExplainer under the same LOSO protocol.
+- **Input:** `data/b_hv_with_features.csv`
+- **Procedure:** In each fold, GB is trained on three specimens and SHAP values are computed on the held-out specimen. Because collinearity screening is refitted per fold, only features retained in all 4 folds (38 features) are used for the averaged importance.
+- **Output:**
+  - `data/e_shap_feature_importance.csv`: mean ± SD |SHAP| across folds
+  - `data/e_shap_per_fold.csv`
+  - `data/figure_shap/gb_shap_summary_plot_top5.png`
+  - `data/figure_shap/gb_shap_bar_plot_top5.png`
 
 ---
 
@@ -194,6 +219,7 @@ Executes end-to-end inference on a single new sample without Ground Truth masks.
 
 ## Notes
 
+- `OMtoHV/01_FeatureExtraction.py` uses relative paths (`base_dir = './'`); run it from inside the `OMtoHV/` folder.
 - EDS filename suffixes: Mg=`01`, Al=`02`, Si=`03`, Ti=`04`, Mn=`05`, Fe=`06`, Cu=`07`, Zn=`08`, Sr=`09`
 - Area fractions: Al uses the full image area as denominator; all other elements use the MAP validity region.
 - `splits.json` is generated automatically during training and is shared across all evaluation and visualization scripts.
