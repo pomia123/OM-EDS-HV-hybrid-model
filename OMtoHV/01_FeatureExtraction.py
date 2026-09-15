@@ -29,7 +29,11 @@ def analyze_single_image(row_data, image_dir, vis_dir, pixel_size, save_vis=Fals
     Extracts features and optionally saves publication-quality visualizations.
     """
     file_name = row_data['FILE_NAME']
-    img_path = os.path.join(image_dir, file_name)
+    specimen = row_data.get('SPECIMEN', None)
+    if specimen is not None and os.path.isdir(os.path.join(image_dir, f"SPC{specimen}")):
+        img_path = os.path.join(image_dir, f"SPC{specimen}", file_name)
+    else:
+        img_path = os.path.join(image_dir, file_name)
 
     try:
         extractor = MicrostructureFeatureExtractor(img_path, pixel_size=pixel_size)
