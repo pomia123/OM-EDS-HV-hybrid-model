@@ -1,5 +1,5 @@
 """
-03_ConformalPrediction_CrossConformal.py - 95% conformal prediction intervals
+03_ConformalPrediction.py - 95% conformal prediction intervals
 using a cross-conformal procedure based on out-of-fold residuals.
 
 Uses the same four-fold leave-one-specimen-out (LOSO) group cross-validation
@@ -77,7 +77,7 @@ models = {
     "RandomForest": lambda: RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1),
 }
 
-print(f"[INFO] CROSS-CONFORMAL (CV+) PREDICTION INTERVALS | alpha={ALPHA} | {n_splits} folds | "
+print(f"[INFO] CROSS-CONFORMAL PREDICTION INTERVALS | alpha={ALPHA} | {n_splits} folds | "
       f"nominal coverage {(1 - ALPHA) * 100:.0f}%")
 print(f"[INFO] {len(df)} samples | q_hat for each fold comes from the other folds' residuals")
 
@@ -193,7 +193,7 @@ for m_name in models:
 df_int.to_csv(intervals_csv, index=False, encoding="utf-8-sig")
 
 print("\n" + "=" * 92)
-print(f" CROSS-CONFORMAL (CV+) PREDICTION INTERVALS - {(1 - ALPHA) * 100:.0f}% NOMINAL")
+print(f" CROSS-CONFORMAL PREDICTION INTERVALS - {(1 - ALPHA) * 100:.0f}% NOMINAL")
 print("=" * 92)
 print(df_summary.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
 print("\nPer-fold detail:")
