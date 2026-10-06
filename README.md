@@ -1,9 +1,9 @@
-# Hybrid Machine Learning Framework for Microstructure-Based Composition Reconstruction and Hardness Prediction of Al–10Si-2Cu Die-Casting Alloys
+# Hybrid Machine Learning Framework for Microstructure-Based Elemental Distribution Mapping and Hardness Prediction of an Al-10Si-2Cu Die-Casting Alloy
 
-Two independent analysis pipelines based on Optical Microscopy (OM) images:
+Two independently developed models based on optical microscopy (OM) images:
 
-- **OMtoHV**: Microstructure feature extraction → ML-based Vickers hardness (HV) prediction
-- **OMtoEDS**: GAN-based deep learning → EDS elemental spatial map prediction
+- **OM–Hardness model** (`OMtoHV/`): OM-derived microstructural feature extraction → ML-based micro-Vickers hardness (HV) prediction
+- **OM–EDS model** (`OMtoEDS/`): CGAN (Pix2Pix)-based image-to-image translation → binary elemental distribution map prediction
 
 ---
 
@@ -19,7 +19,7 @@ project/
 │   ├── 05_SpatialMapVisualization_YGB.py
 │   ├── 06_UncertaintyMap.py
 │   ├── 07_MicrostructureDescriptorAnalysis.py
-│   ├── 07_NewSampleInference.py
+│   ├── 08_NewSampleInference.py
 │   ├── data/
 │        └── EDS
 │        ├── MAP
@@ -63,9 +63,9 @@ project/
 
 ---
 
-## Pipeline 1: OMtoHV
+## Pipeline 1: OM–Hardness (`OMtoHV/`)
 
-Extracts microstructure features from OM images and predicts Vickers hardness (HV) using machine learning.
+Extracts microstructural features from OM images and predicts micro-Vickers hardness (HV) using machine learning.
 
 ### Execution Order
 
@@ -154,9 +154,9 @@ Interprets feature importance of Gradient Boosting using SHAP TreeExplainer unde
 
 ---
 
-## Pipeline 2: OMtoEDS
+## Pipeline 2: OM–EDS (`OMtoEDS/`)
 
-Predicts element-specific binary EDS spatial maps from OM images using a Pix2Pix GAN with a ResNet-34 encoder, CBAM attention, and Tversky loss.
+Predicts element-specific binary elemental distribution maps from OM images using a Pix2Pix-based conditional GAN (CGAN) with a ResNet-34 encoder, CBAM attention, and element-specific Tversky loss. The binarized EDS maps (GT maps) represent element-associated regions, not quantitative elemental concentrations.
 
 Target elements: **Mg, Al, Si, Cu, Fe, Sr**
 
@@ -169,7 +169,7 @@ Target elements: **Mg, Al, Si, Cu, Fe, Sr**
     → 04_MultiElemOverlay.py                  ← Multi-element composite overlay
     → 05_SpatialMapVisualization_YGB.py       ← Match/Miss/False qualitative visualization
     → 06_UncertaintyMap.py                    ← Ensemble pixel uncertainty mapping
-    → 07_MicrostructureDescriptorAnalysis.py  ← Metallurgical descriptor (PSD & NND) validation
+    → 07_MicrostructureDescriptorAnalysis.py  ← Microstructural descriptor (PSD & cross-NND) comparison
     → 08_NewSampleInference.py                ← Inference on new unseen sample
 ```
 
@@ -193,10 +193,10 @@ Trains a Deep Ensemble ($N=3$ independently trained members per element) of Pix2
 Evaluates the test set across individual members, majority voting, and deep ensemble mean predictions for both `best` and `last` model checkpoints.
 - **Input:** `data/OM/`, `data/EDS/`, `data/MASK/`, `data/MAP/`, `result/tversky/splits.json`
 - **Output:** `result/test_tversky/results_per_sample.csv`, `results_area_summary.csv`, `vis_{elem}/`
-- **Metrics:** Sample-level IoU, Dice coefficient, Area fraction standard deviation, and scalar area-based RMSE(%p), MAE(%p), MAPE(%).
+- **Metrics:** Sample-level IoU and Dice coefficient; foreground area fraction (mean ± SD) and area-based RMSE (%p), MAE (%p), and MAPE (%).
 
 **`04_MultiElemOverlay.py`**
-Generates publication-quality composite multi-element spatial maps overlaid on faded OM grayscale backgrounds.
+Generates composite multi-element predicted maps overlaid on faded OM grayscale backgrounds.
 - **Output:** `result/test_tversky/all_elems_{tag}/` (6 elements: Al, Si, Mg, Fe, Cu, Sr), `prec_elems_{tag}/` (4 precipitate elements: Mg, Fe, Cu, Sr)
 - **Features:** Distinct academic color palette with unified upper-left 2-column legends.
 
@@ -212,15 +212,15 @@ Quantifies pixel-level epistemic uncertainty (standard deviation across ensemble
 - **Filtering:** Excludes background/zero-uncertainty regions ($\sigma \le 10^{-6}$) to compute mean uncertainty for precipitates vs. matrix.
 
 **`07_MicrostructureDescriptorAnalysis.py`**
-Statistically validates metallurgical fidelity between Ground Truth and predicted microstructures.
+Statistically compares microstructural descriptors between the GT maps and the predicted binary elemental maps.
 - **Evaluated Descriptors:**
   - **Particle Size Distribution (PSD):** Connected-component area distributions for precipitate phases.
-  - **Cross-Element Nearest-Neighbor Distance (Cross-NND):** Spatial distances between all 6 pairwise combinations of precipitate elements (Mg, Fe, Cu, Sr).
+  - **Cross-element nearest-neighbor distance (cross-NND):** Spatial distances between all 6 pairwise combinations of precipitate elements (Mg, Fe, Cu, Sr).
 - **Metrics:** Kolmogorov-Smirnov (KS) test ($p$-value, statistic) and Wasserstein Distance.
-- **Output:** `result/test_tversky/metallurgical_descriptors_{tag}/` (pooled CSVs, summary tables, and GT vs. Pred histogram plots).
+- **Output:** `result/test_tversky/metallurgical_descriptors_{tag}/` (pooled CSVs, summary tables, and GT vs. predicted histogram plots).
 
-**`07_NewSampleInference.py`**
-Executes end-to-end inference on a single new sample without Ground Truth masks.
+**`08_NewSampleInference.py`**
+Executes end-to-end inference on a single new sample without GT maps.
 - **Input:** `data/pred_data/OM_hv/{NEW_BASE_NAME}.png`, `data/pred_data/MAP_hv/{NEW_BASE_NAME}.png`
 - **Output:** `data/pred_data/result/new_sample_inference/`
   - Raw Area Ratio & 100% Normalized Area Ratio CSV (`mean ± std`)
