@@ -1,226 +1,286 @@
-# Hybrid Machine Learning Framework for Microstructure-Based Composition Reconstruction and Hardness Prediction of Al–10Si-2Cu Die-Casting Alloys
+"""
+Model comparison for HV prediction from OM image features, under leave-one-specimen-out (LOSO) CV.
 
-Two independent analysis pipelines based on Optical Microscopy (OM) images:
+Pipeline:
+- Input: data/b_hv_with_features.csv (one row per image; SPECIMEN, FILE_NAME, HV, image features).
+  Missing feature values are filled with 0.
+- Outer CV: each specimen is held out in turn (K folds = number of specimens), so images from the
+  same specimen never appear in both training and validation.
+- Preprocessing, fitted on the training fold only:
+    1) Collinearity screening: for each feature pair with |r| >= 0.95, the feature with the weaker
+       correlation to HV is dropped.
+    2) Standardisation (StandardScaler), applied to the validation fold using training statistics.
+- Models (fixed hyperparameters, no search): Ridge, Lasso, SVR, RandomForest, GradientBoosting, XGBoost.
+- Metrics: R2, RMSE and MAE on the pooled out-of-fold predictions, plus the per-fold mean and SD.
+- Statistical test: the held-out specimen is the unit of analysis. For each model, the per-fold MAE
+  difference against the best model (highest pooled R2) is tested with a two-sided paired t-test
+  (df = K - 1). Holm correction is applied across the pairwise comparisons, and the mean MAE
+  difference is reported with its 95% CI.
 
-- **OMtoHV**: Microstructure feature extraction → ML-based Vickers hardness (HV) prediction
-- **OMtoEDS**: GAN-based deep learning → EDS elemental spatial map prediction
+Outputs (data/):
+  c_model_comparison_results.csv  pooled and per-fold metrics, Holm-adjusted p-value and significance per model
+  c_per_fold_metrics.csv          R2 / RMSE / MAE per model and fold
+  c_specimen_level_test.csv       paired t-test details (per-fold dMAE, CI, p_raw, p_holm)
+  c_predictions_all_models.csv    out-of-fold predictions of all models
+  c_preprocessing_audit_log.csv   per-fold train/val sizes and removed features
+  c_feature_removal_pairs.csv     feature pairs removed by the collinearity screening
+No figures are produced.
+"""
+import os
+import warnings
+import numpy as np
+import pandas as pd
+from scipy import stats
 
----
+from sklearn.linear_model import Ridge, Lasso
+from sklearn.svm import SVR
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from xgboost import XGBRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 
-## Project Structure
+warnings.filterwarnings("ignore")
 
-```
-project/
-├── OMtoEDS/
-│   ├── 01_HyperparamGridSearch.py
-│   ├── 02_OMtoEDS_pix2pix_deep_ensemble.py
-│   ├── 03_SpatialMapEvaluation_Separate.py
-│   ├── 04_MultiElemOverlay.py
-│   ├── 05_SpatialMapVisualization_YGB.py
-│   ├── 06_UncertaintyMap.py
-│   ├── 07_MicrostructureDescriptorAnalysis.py
-│   ├── 07_NewSampleInference.py
-│   ├── data/
-│        └── EDS
-│        ├── MAP
-│        ├── MASK
-│        ├── OM
-│        ├── result
-│        └── pred_data/            # Data for new sample inference
-│             ├── OM_hv/
-│             ├── MAP_hv/
-│             └── result/
-├── result/
-│   └── tversky/
-│       ├── models_tversky/  # Trained model weights (.pth)
-│       ├── splits.json      # Train/val/test split info
-│       └── test_tversky/    # Evaluation CSVs and visualizations
-│
-├── OMtoHV/
-      ├── 01_FeatureExtraction.py
-      ├── 02_ModelComparison.py
-      ├── 03_ConformalPrediction.py
-      ├── 04_FeatureAnalysis.py
-      └── data/
-           ├── OM_hv/                          # OM images (optionally in SPC{n}/ subfolders)
-           ├── a_hv.csv                        # SPECIMEN, FILE_NAME, HV
-           ├── b_hv_with_features.csv
-           ├── c_model_comparison_results.csv
-           ├── c_per_fold_metrics.csv
-           ├── c_predictions_all_models.csv
-           ├── c_preprocessing_audit_log.csv
-           ├── c_feature_removal_pairs.csv
-           ├── d_conformal_results.csv
-           ├── d_conformal_per_fold.csv
-           ├── d_prediction_intervals.csv
-           ├── e_shap_feature_importance.csv
-           ├── e_shap_per_fold.csv
-           ├── figure/
-           ├── figure_conformal/
-           └── figure_shap/
-```
+# =============================================================================
+# 1. Paths & Configuration
+# =============================================================================
+base_dir = os.path.dirname(os.path.abspath(__file__))
+data_dir = os.path.join(base_dir, "data")
 
----
+input_csv = os.path.join(data_dir, "b_hv_with_features.csv")
+results_csv = os.path.join(data_dir, "c_model_comparison_results.csv")
+per_fold_csv = os.path.join(data_dir, "c_per_fold_metrics.csv")
+specimen_test_csv = os.path.join(data_dir, "c_specimen_level_test.csv")
+predictions_csv = os.path.join(data_dir, "c_predictions_all_models.csv")
+preproc_log_csv = os.path.join(data_dir, "c_preprocessing_audit_log.csv")
+feature_pairs_csv = os.path.join(data_dir, "c_feature_removal_pairs.csv")
 
-## Pipeline 1: OMtoHV
+TARGET = "HV"
+GROUP_COL = "SPECIMEN"
+CORR_THRESHOLD = 0.95
+ALPHA = 0.05
 
-Extracts microstructure features from OM images and predicts Vickers hardness (HV) using machine learning.
+# =============================================================================
+# 2. Load Dataset & Define Outer Group Splits (Leave-One-Specimen-Out)
+# =============================================================================
+df = pd.read_csv(input_csv)
+meta_cols = ["SPECIMEN", "FILE_NAME", TARGET]
+raw_feature_cols = [c for c in df.columns if c not in meta_cols]
+df[raw_feature_cols] = df[raw_feature_cols].fillna(0)
 
-### Execution Order
+specimens = sorted(df[GROUP_COL].unique())
+outer_splits = [
+    (np.where(df[GROUP_COL].values != s)[0], np.where(df[GROUP_COL].values == s)[0])
+    for s in specimens
+]
+fold_labels = [f"SPC{s}" for s in specimens]
+n_splits = len(outer_splits)
 
-```
-      01_FeatureExtraction.py
-    → 02_ModelComparison.py
-    → 03_ConformalPrediction.py
-    → 04_FeatureAnalysis.py
-```
+print(f"[INFO] Leave-One-Specimen-Out Group CV | {n_splits} outer folds | group key = '{GROUP_COL}'")
+print(f"[INFO] {len(df)} samples | {len(raw_feature_cols)} candidate features")
 
-### Validation Protocol (shared by 02–04)
+# Hyperparameters are fixed; no search is performed.
+models = {
+    "Ridge": lambda: Ridge(alpha=1.0),
+    "Lasso": lambda: Lasso(alpha=0.1, random_state=42, max_iter=3000),
+    "SVR": lambda: SVR(kernel="rbf", C=10),
+    "RandomForest": lambda: RandomForestRegressor(n_estimators=200, random_state=42, n_jobs=-1),
+    "GradientBoosting": lambda: GradientBoostingRegressor(n_estimators=200, random_state=42),
+    "XGBoost": lambda: XGBRegressor(n_estimators=200, learning_rate=0.05, random_state=42, n_jobs=-1),
+}
+HYPERPARAMS = {
+    "Ridge": "alpha=1.0",
+    "Lasso": "alpha=0.1",
+    "SVR": "kernel=rbf, C=10",
+    "RandomForest": "n_estimators=200",
+    "GradientBoosting": "n_estimators=200",
+    "XGBoost": "n_estimators=200, learning_rate=0.05",
+}
 
-- **Leave-one-specimen-out (LOSO) group CV:** 4 folds, grouped by `SPECIMEN` (SPC1–SPC4 = 169 / 120 / 110 / 130 samples; 529 in total). In each fold, one specimen is held out and the models are trained on the remaining three.
-- **Per-fold preprocessing (training fold only):**
-  - Pearson collinearity screening ($|r| \ge 0.95$): for each highly correlated pair, the feature with the weaker correlation to HV is dropped.
-  - `StandardScaler` fitted on the training fold, then applied to the held-out fold.
-- **Hyperparameters:** fixed (no search).
-- All 529 samples are used (no outlier removal).
+# =============================================================================
+# 3. Group CV
+# =============================================================================
+predictions = {m: np.full(len(df), np.nan) for m in models}
+per_fold_rows, preproc_rows, pair_rows = [], [], []
 
-### Script Descriptions
+print("\n" + "=" * 88)
+print(" LEAVE-ONE-SPECIMEN-OUT GROUP CV")
+print("=" * 88)
 
-**`01_FeatureExtraction.py`**  
-Extracts microstructure features from OM images in parallel (`ProcessPoolExecutor`).
-- **Input:** `data/OM_hv/` (images in `SPC{n}/` subfolders are also supported), `data/a_hv.csv`
-- **Output:** `data/b_hv_with_features.csv` (529 samples, 48 features)
-- **Features:** secondary phase morphology, dendrite orientation, DAS, eutectic structure (fraction, lamella thickness, skeleton), GLCM texture, LBP, intensity statistics, autocorrelation length
-- **Visualization:** Feature maps for the first sample only are saved to `data/figure/`
+for fold_idx, (train_idx, val_idx) in enumerate(outer_splits):
+    df_train = df.iloc[train_idx].copy()
+    df_val = df.iloc[val_idx].copy()
+    held_out = fold_labels[fold_idx]
 
-**`02_ModelComparison.py`**  
-Benchmarks 6 regression models under LOSO group CV and performs Wilcoxon signed-rank tests on pooled absolute errors against the best model.
-- **Input:** `data/b_hv_with_features.csv`
-- **Models:** Ridge (α=1.0), Lasso (α=0.1), SVR (RBF, C=10), RandomForest (n_estimators=200), GradientBoosting (n_estimators=200), XGBoost (n_estimators=200, learning_rate=0.05)
-- **Metrics:** $R^2$, RMSE, MAE (pooled out-of-fold, plus per-fold mean ± SD)
-- **Output:**
-  - `data/c_model_comparison_results.csv`: summary and Wilcoxon p-values
-  - `data/c_per_fold_metrics.csv`: per-fold metrics
-  - `data/c_predictions_all_models.csv`: out-of-fold predictions
-  - `data/c_preprocessing_audit_log.csv`: per-fold retained/removed features, scaler fit scope
-  - `data/c_feature_removal_pairs.csv`: removed collinear pairs
-  - `data/figure/`: Actual vs. Predicted plots
+    print(f"\n>>> [Fold {fold_idx + 1}/{n_splits}] Held-out: {held_out} | "
+          f"Train: {len(df_train)} | Val: {len(df_val)}")
 
-|  Model  |   R²  | RMSE  |  MAE  |
-|---------|-------|-------|-------|
-|    GB   | 0.848 | 1.141 | 0.840 |
-| XGBoost | 0.838 | 1.180 | 0.858 |
-|    RF   | 0.816 | 1.257 | 0.884 |
+    # --- 3.1 Collinearity screening, fitted on the training fold only ---------
+    #     For each feature pair above the threshold, the feature with the weaker
+    #     correlation to HV is dropped.
+    corr_matrix = df_train[raw_feature_cols].corr().abs()
+    target_corr = df_train[raw_feature_cols].apply(lambda x: x.corr(df_train[TARGET])).abs()
 
-**`03_ConformalPrediction.py`**  
-Computes 95% prediction intervals with cross-conformal prediction based on out-of-fold residuals for GradientBoosting, XGBoost, and RandomForest. Point predictions follow the same LOSO protocol as `02`.
-- **Input:** `data/b_hv_with_features.csv`
-- **Calibration:** For each held-out specimen, the absolute out-of-fold residuals of the other three folds are pooled as the calibration set. The held-out specimen does not contribute to its own interval width.
-- **Interval:** $q_{\text{level}} = \lceil (n_{\text{cal}}+1)(1-\alpha) \rceil / n_{\text{cal}}$, with $\alpha = 0.05$. $\hat{q}$ is the $q_{\text{level}}$ empirical quantile of the calibration residuals, and each interval is the prediction $\pm \hat{q}$.
-- **Coverage:** Empirical coverage is evaluated per held-out fold and across all folds.
-- **Output:**
-  - `data/d_conformal_results.csv`: summary
-  - `data/d_conformal_per_fold.csv`: per-fold $\hat{q}$ and coverage
-  - `data/d_prediction_intervals.csv`: per-sample intervals
-  - `data/figure_conformal/`
+    removed_features = set()
+    for i in range(len(raw_feature_cols)):
+        for j in range(i + 1, len(raw_feature_cols)):
+            c1, c2 = raw_feature_cols[i], raw_feature_cols[j]
+            if c1 in removed_features or c2 in removed_features:
+                continue
+            r_val = corr_matrix.loc[c1, c2]
+            if r_val >= CORR_THRESHOLD:
+                if target_corr[c1] >= target_corr[c2]:
+                    kept, dropped = c1, c2
+                else:
+                    kept, dropped = c2, c1
+                removed_features.add(dropped)
+                pair_rows.append({
+                    "Fold": fold_idx + 1,
+                    "Held_Out": held_out,
+                    "Retained Feature": kept,
+                    "Removed Feature": dropped,
+                    "Inter-feature Correlation": round(float(r_val), 4),
+                    "Target Correlation (Retained)": round(float(target_corr[kept]), 4),
+                    "Target Correlation (Removed)": round(float(target_corr[dropped]), 4),
+                })
 
-|  Model  | CP Margin (HV, fold mean) | Empirical Coverage |
-|---------|---------------------------|--------------------|
-|    GB   | ±2.08                     | 95.27%             |
-| XGBoost | ±2.32                     | 95.09%             |
-|    RF   | ±2.60                     | 95.09%             |
+    selected_features = [c for c in raw_feature_cols if c not in removed_features]
+    print(f"    - [Collinearity |r|<{CORR_THRESHOLD}] retained {len(selected_features)}"
+          f" / {len(raw_feature_cols)} features ({len(removed_features)} removed)")
 
-**`04_FeatureAnalysis.py`**  
-Interprets feature importance of Gradient Boosting using SHAP TreeExplainer under the same LOSO protocol.
-- **Input:** `data/b_hv_with_features.csv`
-- **Procedure:** In each fold, GB is trained on three specimens and SHAP values are computed on the held-out specimen. Because collinearity screening is refitted per fold, only features retained in all 4 folds (38 features) are used for the averaged importance.
-- **Output:**
-  - `data/e_shap_feature_importance.csv`: mean ± SD |SHAP| across folds
-  - `data/e_shap_per_fold.csv`
-  - `data/figure_shap/gb_shap_summary_plot_top5.png`
-  - `data/figure_shap/gb_shap_bar_plot_top5.png`
+    # --- 3.2 Standardisation: fit on train, transform only on validation ------
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(df_train[selected_features].values)
+    y_train = df_train[TARGET].values
+    X_val = scaler.transform(df_val[selected_features].values)
+    y_val = df_val[TARGET].values
 
----
+    preproc_rows.append({
+        "Fold": fold_idx + 1,
+        "Held_Out": held_out,
+        "N_Train": int(len(df_train)),
+        "N_Val": int(len(df_val)),
+        "N_Features_Retained": int(len(selected_features)),
+        "N_Features_Removed": int(len(removed_features)),
+        "Features_Removed": "; ".join(sorted(removed_features)),
+        "Scaler_Fitted_On": "training fold only",
+    })
 
-## Pipeline 2: OMtoEDS
+    for m_name, make_model in models.items():
+        est = make_model()
+        est.fit(X_train, y_train)
+        y_val_pred = est.predict(X_val)
+        predictions[m_name][val_idx] = y_val_pred
 
-Predicts element-specific binary EDS spatial maps from OM images using a Pix2Pix GAN with a ResNet-34 encoder, CBAM attention, and Tversky loss.
+        per_fold_rows.append({
+            "Model": m_name,
+            "Fold": fold_idx + 1,
+            "Held_Out": held_out,
+            "N_Val": int(len(y_val)),
+            "R2": r2_score(y_val, y_val_pred),
+            "RMSE": float(np.sqrt(mean_squared_error(y_val, y_val_pred))),
+            "MAE": float(mean_absolute_error(y_val, y_val_pred)),
+        })
 
-Target elements: **Mg, Al, Si, Cu, Fe, Sr**
+for m_name, p in predictions.items():
+    assert not np.isnan(p).any(), f"{m_name}: {int(np.isnan(p).sum())} samples without a prediction"
 
-### Execution Order
+pd.DataFrame(preproc_rows).to_csv(preproc_log_csv, index=False, encoding="utf-8-sig")
+df_pairs = pd.DataFrame(pair_rows)
+df_pairs.to_csv(feature_pairs_csv, index=False, encoding="utf-8-sig")
 
-```
-      01_HyperparamGridSearch.py              ← Hyperparameter optimization
-    → 02_OMtoEDS_pix2pix_deep_ensemble.py     ← Deep Ensemble model training
-    → 03_SpatialMapEvaluation_Separate.py     ← Per-element quantitative evaluation
-    → 04_MultiElemOverlay.py                  ← Multi-element composite overlay
-    → 05_SpatialMapVisualization_YGB.py       ← Match/Miss/False qualitative visualization
-    → 06_UncertaintyMap.py                    ← Ensemble pixel uncertainty mapping
-    → 07_MicrostructureDescriptorAnalysis.py  ← Metallurgical descriptor (PSD & NND) validation
-    → 08_NewSampleInference.py                ← Inference on new unseen sample
-```
+# =============================================================================
+# 4. Metrics and specimen-level paired t-test (per-fold MAE, Holm-corrected)
+# =============================================================================
+y_true = df[TARGET].values
+df_per_fold = pd.DataFrame(per_fold_rows)
+df_per_fold.to_csv(per_fold_csv, index=False, encoding="utf-8-sig")
 
-### Script Descriptions
+rows = []
+for m_name in models:
+    y_pred = predictions[m_name]
+    sub = df_per_fold[df_per_fold["Model"] == m_name]
+    rows.append({
+        "Model": m_name,
+        "Hyperparameters": HYPERPARAMS[m_name],
+        "R2": r2_score(y_true, y_pred),
+        "RMSE": float(np.sqrt(mean_squared_error(y_true, y_pred))),
+        "MAE": float(mean_absolute_error(y_true, y_pred)),
+        "R2_fold_mean": sub["R2"].mean(),
+        "R2_fold_std": sub["R2"].std(ddof=1),
+        "RMSE_fold_mean": sub["RMSE"].mean(),
+        "RMSE_fold_std": sub["RMSE"].std(ddof=1),
+        "MAE_fold_mean": sub["MAE"].mean(),
+        "MAE_fold_std": sub["MAE"].std(ddof=1),
+    })
 
-**`01_HyperparamGridSearch.py`**  
-Optimizes pixel-loss weighting ($\lambda_{\text{pix}}$), focal loss hyperparameters ($\alpha, \gamma$), and focal/Tversky loss ratios for representative elements.
-- **Input:** `data/OM/`, `data/EDS/`, `data/MASK/`, `data/MAP/`, `result/tversky/splits.json`
-- **Output:** `result/tversky/grid_search/grid_results_{elem}.csv`, `grid_search_best_params.csv`
-- **Ranking Criteria:** Minimum validation Mean Absolute Error (MAE) and Intersection over Union (IoU)
+df_results = pd.DataFrame(rows).sort_values("R2", ascending=False).reset_index(drop=True)
+best_model_name = df_results.iloc[0]["Model"]
 
-**`02_OMtoEDS_pix2pix_deep_ensemble.py`**
-Trains a Deep Ensemble ($N=3$ independently trained members per element) of Pix2Pix GANs.
-- **Input:** `data/OM/`, `data/EDS/`, `data/MASK/`, `data/MAP/`
-- **Output:** `result/tversky/models_tversky/best_model_{elem}_{idx}_{epoch}.pth`, `last_model_{elem}_{idx}.pth`, `splits.json`
-- **Architecture:** U-Net Generator (ResNet-34 encoder + CBAM attention blocks in decoder) + PatchGAN Discriminator
-- **Loss:** Element-specific Tversky Loss + Focal Loss + GAN Adversarial Loss
-- **Hyperparameters:** $512 \times 512$ random crop, batch size = 32, epochs = 1001, $\text{Adam } (\text{lr}=2\times 10^{-4})$
+# Per-fold MAE matrix: rows = held-out specimen, columns = model.
+mae_fold = df_per_fold.pivot(index="Held_Out", columns="Model", values="MAE").loc[fold_labels]
+K = len(fold_labels)
+t_crit = stats.t.ppf(1 - ALPHA / 2, df=K - 1)
 
-**`03_SpatialMapEvaluation_Separate.py`**
-Evaluates the test set across individual members, majority voting, and deep ensemble mean predictions for both `best` and `last` model checkpoints.
-- **Input:** `data/OM/`, `data/EDS/`, `data/MASK/`, `data/MAP/`, `result/tversky/splits.json`
-- **Output:** `result/test_tversky/results_per_sample.csv`, `results_area_summary.csv`, `vis_{elem}/`
-- **Metrics:** Sample-level IoU, Dice coefficient, Area fraction standard deviation, and scalar area-based RMSE(%p), MAE(%p), MAPE(%).
+# d_k = MAE_k(other) - MAE_k(best); d_k > 0 means the best model had the lower error on specimen k.
+test_rows = []
+for m_name in df_results["Model"]:
+    if m_name == best_model_name:
+        continue
+    d = (mae_fold[m_name] - mae_fold[best_model_name]).values
+    d_mean, d_sd = d.mean(), d.std(ddof=1)
+    se = d_sd / np.sqrt(K)
+    t_stat = d_mean / se
+    row = {
+        "Model": m_name,
+        "Reference": best_model_name,
+        "Folds_Ref_Better": f"{int((d > 0).sum())}/{K}",
+        "Mean_dMAE": d_mean,
+        "SD_dMAE": d_sd,
+        "CI95_Low": d_mean - t_crit * se,
+        "CI95_High": d_mean + t_crit * se,
+        "t": t_stat,
+        "df": K - 1,
+        "p_raw": float(2 * stats.t.sf(abs(t_stat), df=K - 1)),
+    }
+    row.update({f"dMAE_{lbl}": v for lbl, v in zip(fold_labels, d)})
+    test_rows.append(row)
 
-**`04_MultiElemOverlay.py`**
-Generates publication-quality composite multi-element spatial maps overlaid on faded OM grayscale backgrounds.
-- **Output:** `result/test_tversky/all_elems_{tag}/` (6 elements: Al, Si, Mg, Fe, Cu, Sr), `prec_elems_{tag}/` (4 precipitate elements: Mg, Fe, Cu, Sr)
-- **Features:** Distinct academic color palette with unified upper-left 2-column legends.
+# Holm step-down correction over the pairwise comparisons against the best model.
+df_test = pd.DataFrame(test_rows).sort_values("p_raw").reset_index(drop=True)
+m_tests = len(df_test)
+df_test["p_holm"] = np.maximum.accumulate(
+    np.minimum(1.0, (m_tests - np.arange(m_tests)) * df_test["p_raw"].values))
+df_test["Significance"] = np.where(df_test["p_holm"] < ALPHA,
+                                   f"Significant (Holm p<{ALPHA})", "Not Significant")
+df_test.to_csv(specimen_test_csv, index=False, encoding="utf-8-sig")
 
-**`05_SpatialMapVisualization_YGB.py`**
-Performs pixel-level classification error analysis with ensemble-agreement-weighted opacity.
-- **Classification Categories:** Match (True Positive, Green), Miss (False Negative, Yellow), False (False Positive, Red)
-- **Output:** `result/test_tversky/pure_mask_{elem}_{tag}/`
-- **Ensemble Opacity:** Alpha blending ($0.33 \rightarrow 1.0$) proportionally scaled to member vote counts.
+p_holm = dict(zip(df_test["Model"], df_test["p_holm"]))
+p_holm[best_model_name] = np.nan
+df_results["Specimen_t_vs_Best_p_Holm"] = df_results["Model"].map(p_holm)
+df_results["Significance"] = df_results["Model"].map(
+    dict(zip(df_test["Model"], df_test["Significance"]), **{best_model_name: "Best Model (Ref)"}))
+df_results.to_csv(results_csv, index=False, encoding="utf-8-sig")
 
-**`06_UncertaintyMap.py`** 
-Quantifies pixel-level epistemic uncertainty (standard deviation across ensemble members) and exports filtered uncertainty metrics.
-- **Output:** `result/test_tversky/uncertainty_maps/{tag}/{elem}/` (standalone heatmaps & OM overlays), `uncertainty_summary_filtered_{tag}.csv`
-- **Filtering:** Excludes background/zero-uncertainty regions ($\sigma \le 10^{-6}$) to compute mean uncertainty for precipitates vs. matrix.
+df_preds = pd.DataFrame({"SPECIMEN": df["SPECIMEN"], "FILE_NAME": df["FILE_NAME"], "HV_Actual": y_true})
+for m_name in models:
+    df_preds[f"Pred_{m_name}"] = predictions[m_name]
+df_preds.to_csv(predictions_csv, index=False, encoding="utf-8-sig")
 
-**`07_MicrostructureDescriptorAnalysis.py`**
-Statistically validates metallurgical fidelity between Ground Truth and predicted microstructures.
-- **Evaluated Descriptors:**
-  - **Particle Size Distribution (PSD):** Connected-component area distributions for precipitate phases.
-  - **Cross-Element Nearest-Neighbor Distance (Cross-NND):** Spatial distances between all 6 pairwise combinations of precipitate elements (Mg, Fe, Cu, Sr).
-- **Metrics:** Kolmogorov-Smirnov (KS) test ($p$-value, statistic) and Wasserstein Distance.
-- **Output:** `result/test_tversky/metallurgical_descriptors_{tag}/` (pooled CSVs, summary tables, and GT vs. Pred histogram plots).
+print("\n" + "=" * 88)
+print(f" BENCHMARK (pooled out-of-fold metrics; test unit = held-out specimen, K = {K})")
+print("=" * 88)
+print(df_results[["Model", "R2", "RMSE", "MAE", "MAE_fold_mean", "MAE_fold_std",
+                  "Specimen_t_vs_Best_p_Holm", "Significance"]].to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+print(f"\nSpecimen-level paired t-test on per-fold MAE vs {best_model_name} (two-sided, df = {K - 1}, Holm):")
+print(df_test[["Model", "Folds_Ref_Better", "Mean_dMAE", "CI95_Low", "CI95_High", "t", "p_raw", "p_holm",
+               "Significance"]].to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+print("\nPer-fold MAE:")
+print(mae_fold.to_string(float_format=lambda x: f"{x:.4f}"))
 
-**`07_NewSampleInference.py`**
-Executes end-to-end inference on a single new sample without Ground Truth masks.
-- **Input:** `data/pred_data/OM_hv/{NEW_BASE_NAME}.png`, `data/pred_data/MAP_hv/{NEW_BASE_NAME}.png`
-- **Output:** `data/pred_data/result/new_sample_inference/`
-  - Raw Area Ratio & 100% Normalized Area Ratio CSV (`mean ± std`)
-  - Text summary report (`_summary_report.txt`)
-  - 6-element (`_6elems_last_Pred.png`) and 4-precipitate (`_prec4_last_Pred.png`) overlay images
-- **Configuration:** Set target sample name via `NEW_BASE_NAME` at the top of the script.
----
-
-## Notes
-
-- `OMtoHV/01_FeatureExtraction.py` uses relative paths (`base_dir = './'`); run it from inside the `OMtoHV/` folder.
-- EDS filename suffixes: Mg=`01`, Al=`02`, Si=`03`, Ti=`04`, Mn=`05`, Fe=`06`, Cu=`07`, Zn=`08`, Sr=`09`
-- Area fractions: Al uses the full image area as denominator; all other elements use the MAP validity region.
-- `splits.json` is generated automatically during training and is shared across all evaluation and visualization scripts.
-- Image paths containing non-ASCII characters are handled by the `imread_korean()` utility function.
+print(f"\n[INFO] Results           -> {results_csv}")
+print(f"[INFO] Specimen test     -> {specimen_test_csv}")
+print(f"[INFO] Per-fold          -> {per_fold_csv}")
+print(f"[INFO] Predictions       -> {predictions_csv}")
+print(f"[INFO] Preprocessing log -> {preproc_log_csv}")
+print(f"[INFO] Feature removal   -> {feature_pairs_csv}")
