@@ -1,9 +1,36 @@
+"""
+Model comparison for HV prediction from OM image features, under leave-one-specimen-out (LOSO) CV.
+
+Pipeline:
+- Input: data/b_hv_with_features.csv (one row per image; SPECIMEN, FILE_NAME, HV, image features).
+  Missing feature values are filled with 0.
+- Outer CV: each specimen is held out in turn (K folds = number of specimens), so images from the
+  same specimen never appear in both training and validation.
+- Preprocessing, fitted on the training fold only:
+    1) Collinearity screening: for each feature pair with |r| >= 0.95, the feature with the weaker
+       correlation to HV is dropped.
+    2) Standardisation (StandardScaler), applied to the validation fold using training statistics.
+- Models (fixed hyperparameters, no search): Ridge, Lasso, SVR, RandomForest, GradientBoosting, XGBoost.
+- Metrics: R2, RMSE and MAE on the pooled out-of-fold predictions, plus the per-fold mean and SD.
+- Statistical test: the held-out specimen is the unit of analysis. For each model, the per-fold MAE
+  difference against the best model (highest pooled R2) is tested with a two-sided paired t-test
+  (df = K - 1). Holm correction is applied across the pairwise comparisons, and the mean MAE
+  difference is reported with its 95% CI.
+
+Outputs (data/, _v2 suffix):
+  c_model_comparison_results_v2.csv  over significance per model
+  c_per_fold_metrics_v2.csv          R2 / RMSE / MAE per model and fold
+  c_specimen_level_test_v2.csv       paired t-test details (per-fold dMAE, CI, p_raw, p_holm)
+  c_predictions_all_models_v2.csv    out-dels
+  c_preprocessing_audit_log_v2.csv   per-fold train/val sizes and removed features
+  c_feature_removal_pairs_v2.csv     feature pairs removed by the collinearity screening
+No figures are produced.
+"""
 import os
 import warnings
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.stats import wilcoxon
+from scipy import stats
 
 from sklearn.linear_model import Ridge, Lasso
 from sklearn.svm import SVR
@@ -13,28 +40,25 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 
 warnings.filterwarnings("ignore")
-plt.rcParams["font.family"] = "DejaVu Sans"
-fontsize = 35
-PLOT_COLOR = "#2b5c8f"
 
 # =============================================================================
 # 1. Paths & Configuration
 # =============================================================================
 base_dir = os.path.dirname(os.path.abspath(__file__))
 data_dir = os.path.join(base_dir, "data")
-figure_dir = os.path.join(data_dir, "figure")
-os.makedirs(figure_dir, exist_ok=True)
 
 input_csv = os.path.join(data_dir, "b_hv_with_features.csv")
-results_csv = os.path.join(data_dir, "c_model_comparison_results.csv")
-per_fold_csv = os.path.join(data_dir, "c_per_fold_metrics.csv")
-predictions_csv = os.path.join(data_dir, "c_predictions_all_models.csv")
-preproc_log_csv = os.path.join(data_dir, "c_preprocessing_audit_log.csv")
-feature_pairs_csv = os.path.join(data_dir, "c_feature_removal_pairs.csv")
+results_csv = os.path.join(data_dir, "c_model_comparison_results_v2.csv")
+per_fold_csv = os.path.join(data_dir, "c_per_fold_metrics_v2.csv")
+specimen_test_csv = os.path.join(data_dir, "c_specimen_level_test_v2.csv")
+predictions_csv = os.path.join(data_dir, "c_predictions_all_models_v2.csv")
+preproc_log_csv = os.path.join(data_dir, "c_preprocessing_audit_log_v2.csv")
+feature_pairs_csv = os.path.join(data_dir, "c_feature_removal_pairs_v2.csv")
 
 TARGET = "HV"
 GROUP_COL = "SPECIMEN"
 CORR_THRESHOLD = 0.95
+ALPHA = 0.05
 
 # =============================================================================
 # 2. Load Dataset & Define Outer Group Splits (Leave-One-Specimen-Out)
@@ -166,16 +190,15 @@ df_pairs = pd.DataFrame(pair_rows)
 df_pairs.to_csv(feature_pairs_csv, index=False, encoding="utf-8-sig")
 
 # =============================================================================
-# 4. Metrics and Wilcoxon signed-rank test
+# 4. Metrics and specimen-level paired t-test (per-fold MAE, Holm-corrected)
 # =============================================================================
 y_true = df[TARGET].values
 df_per_fold = pd.DataFrame(per_fold_rows)
 df_per_fold.to_csv(per_fold_csv, index=False, encoding="utf-8-sig")
 
-rows, model_errors = [], {}
+rows = []
 for m_name in models:
     y_pred = predictions[m_name]
-    model_errors[m_name] = np.abs(y_true - y_pred)
     sub = df_per_fold[df_per_fold["Model"] == m_name]
     rows.append({
         "Model": m_name,
@@ -187,26 +210,56 @@ for m_name in models:
         "R2_fold_std": sub["R2"].std(ddof=1),
         "RMSE_fold_mean": sub["RMSE"].mean(),
         "RMSE_fold_std": sub["RMSE"].std(ddof=1),
+        "MAE_fold_mean": sub["MAE"].mean(),
+        "MAE_fold_std": sub["MAE"].std(ddof=1),
     })
 
 df_results = pd.DataFrame(rows).sort_values("R2", ascending=False).reset_index(drop=True)
 best_model_name = df_results.iloc[0]["Model"]
-err_best = model_errors[best_model_name]
 
-p_vals, sig = {}, {}
+# Per-fold MAE matrix: rows = held-out specimen, columns = model.
+mae_fold = df_per_fold.pivot(index="Held_Out", columns="Model", values="MAE").loc[fold_labels]
+K = len(fold_labels)
+t_crit = stats.t.ppf(1 - ALPHA / 2, df=K - 1)
+
+# d_k = MAE_k(other) - MAE_k(best); d_k > 0 means the best model had the lower error on specimen k.
+test_rows = []
 for m_name in df_results["Model"]:
     if m_name == best_model_name:
-        p_vals[m_name], sig[m_name] = 1.0, "Best Model (Ref)"
         continue
-    try:
-        p_vals[m_name] = float(wilcoxon(err_best, model_errors[m_name], zero_method="wilcox")[1])
-    except Exception:
-        p_vals[m_name] = np.nan
-    sig[m_name] = ("Significant (p<0.05)" if p_vals[m_name] == p_vals[m_name] and p_vals[m_name] < 0.05
-                   else "Not Significant")
+    d = (mae_fold[m_name] - mae_fold[best_model_name]).values
+    d_mean, d_sd = d.mean(), d.std(ddof=1)
+    se = d_sd / np.sqrt(K)
+    t_stat = d_mean / se
+    row = {
+        "Model": m_name,
+        "Reference": best_model_name,
+        "Folds_Ref_Better": f"{int((d > 0).sum())}/{K}",
+        "Mean_dMAE": d_mean,
+        "SD_dMAE": d_sd,
+        "CI95_Low": d_mean - t_crit * se,
+        "CI95_High": d_mean + t_crit * se,
+        "t": t_stat,
+        "df": K - 1,
+        "p_raw": float(2 * stats.t.sf(abs(t_stat), df=K - 1)),
+    }
+    row.update({f"dMAE_{lbl}": v for lbl, v in zip(fold_labels, d)})
+    test_rows.append(row)
 
-df_results["Wilcoxon_vs_Best_p"] = df_results["Model"].map(p_vals)
-df_results["Significance"] = df_results["Model"].map(sig)
+# Holm step-down correction over the pairwise comparisons against the best model.
+df_test = pd.DataFrame(test_rows).sort_values("p_raw").reset_index(drop=True)
+m_tests = len(df_test)
+df_test["p_holm"] = np.maximum.accumulate(
+    np.minimum(1.0, (m_tests - np.arange(m_tests)) * df_test["p_raw"].values))
+df_test["Significance"] = np.where(df_test["p_holm"] < ALPHA,
+                                   f"Significant (Holm p<{ALPHA})", "Not Significant")
+df_test.to_csv(specimen_test_csv, index=False, encoding="utf-8-sig")
+
+p_holm = dict(zip(df_test["Model"], df_test["p_holm"]))
+p_holm[best_model_name] = np.nan
+df_results["Specimen_t_vs_Best_p_Holm"] = df_results["Model"].map(p_holm)
+df_results["Significance"] = df_results["Model"].map(
+    dict(zip(df_test["Model"], df_test["Significance"]), **{best_model_name: "Best Model (Ref)"}))
 df_results.to_csv(results_csv, index=False, encoding="utf-8-sig")
 
 df_preds = pd.DataFrame({"SPECIMEN": df["SPECIMEN"], "FILE_NAME": df["FILE_NAME"], "HV_Actual": y_true})
@@ -215,64 +268,18 @@ for m_name in models:
 df_preds.to_csv(predictions_csv, index=False, encoding="utf-8-sig")
 
 print("\n" + "=" * 88)
-print(f" BENCHMARK (pooled out-of-fold, Wilcoxon on all {len(df)} samples vs {best_model_name})")
+print(f" BENCHMARK (pooled out-of-fold metrics; test unit = held-out specimen, K = {K})")
 print("=" * 88)
-print(df_results[["Model", "R2", "RMSE", "MAE", "R2_fold_mean", "R2_fold_std",
-                  "Wilcoxon_vs_Best_p", "Significance"]].to_string(index=False, float_format=lambda x: f"{x:.4f}"))
-print("\nPer-fold detail:")
-print(df_per_fold.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+print(df_results[["Model", "R2", "RMSE", "MAE", "MAE_fold_mean", "MAE_fold_std",
+                  "Specimen_t_vs_Best_p_Holm", "Significance"]].to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+print(f"\nSpecimen-level paired t-test on per-fold MAE vs {best_model_name} (two-sided, df = {K - 1}, Holm):")
+print(df_test[["Model", "Folds_Ref_Better", "Mean_dMAE", "CI95_Low", "CI95_High", "t", "p_raw", "p_holm",
+               "Significance"]].to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+print("\nPer-fold MAE:")
+print(mae_fold.to_string(float_format=lambda x: f"{x:.4f}"))
 
-# =============================================================================
-# 5. Figures
-# =============================================================================
-fig, axes = plt.subplots(nrows=2, ncols=3, figsize=(22, 14))
-axes = axes.flatten()
-
-# Shared axis range across every model, so the panels are directly comparable.
-all_pred = np.concatenate([predictions[m] for m in models])
-data_min = min(y_true.min(), all_pred.min())
-data_max = max(y_true.max(), all_pred.max())
-pad = (data_max - data_min) * 0.04
-min_val, max_val = data_min - pad, data_max + pad
-
-for i, m_name in enumerate(models):
-    y_pred = predictions[m_name]
-    r2 = df_results[df_results["Model"] == m_name].iloc[0]["R2"]
-
-    fig_single, ax_single = plt.subplots(figsize=(10, 10))
-    ax_single.scatter(y_true, y_pred, alpha=0.6, edgecolors="w", color=PLOT_COLOR, s=50)
-    ax_single.plot([min_val, max_val], [min_val, max_val], "r--", lw=2, label=f"$R^2 = {r2:.3f}$")
-    ax_single.set_xlim(min_val, max_val)
-    ax_single.set_ylim(min_val, max_val)
-    ax_single.set_xlabel("Actual HV", fontsize=fontsize)
-    ax_single.set_ylabel("Predicted HV", fontsize=fontsize)
-    ax_single.tick_params(axis="both", labelsize=fontsize)
-    ax_single.legend(loc="upper left", fontsize=fontsize, frameon=True)
-    ax_single.grid(True, linestyle=":", alpha=0.6)
-    fig_single.tight_layout()
-    fig_single.savefig(os.path.join(figure_dir, f"{m_name.lower()}_actual_vs_predicted.png"),
-                       dpi=300, bbox_inches="tight")
-    plt.close(fig_single)
-
-    ax = axes[i]
-    ax.scatter(y_true, y_pred, alpha=0.5, edgecolors="w", color=PLOT_COLOR)
-    ax.plot([min_val, max_val], [min_val, max_val], "r--", lw=2, label=f"{m_name}: $R^2 = {r2:.3f}$")
-    ax.set_xlim(min_val, max_val)
-    ax.set_ylim(min_val, max_val)
-    ax.set_xlabel("Actual HV", fontsize=fontsize)
-    ax.set_ylabel("Predicted HV", fontsize=fontsize)
-    ax.tick_params(axis="both", labelsize=fontsize)
-    ax.legend(loc="upper left", fontsize=fontsize, frameon=True)
-    ax.grid(True, linestyle=":", alpha=0.6)
-
-for j in range(len(models), len(axes)):
-    fig.delaxes(axes[j])
-fig.tight_layout()
-fig.savefig(os.path.join(figure_dir, "cv_actual_vs_predicted_all.png"), dpi=300, bbox_inches="tight")
-plt.close(fig)
-
-print(f"\n[INFO] Figures           -> {figure_dir}")
-print(f"[INFO] Results           -> {results_csv}")
+print(f"\n[INFO] Results           -> {results_csv}")
+print(f"[INFO] Specimen test     -> {specimen_test_csv}")
 print(f"[INFO] Per-fold          -> {per_fold_csv}")
 print(f"[INFO] Predictions       -> {predictions_csv}")
 print(f"[INFO] Preprocessing log -> {preproc_log_csv}")
