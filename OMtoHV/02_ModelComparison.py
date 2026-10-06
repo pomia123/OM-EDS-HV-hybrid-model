@@ -48,12 +48,12 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 data_dir = os.path.join(base_dir, "data")
 
 input_csv = os.path.join(data_dir, "b_hv_with_features.csv")
-results_csv = os.path.join(data_dir, "c_model_comparison_results_v2.csv")
-per_fold_csv = os.path.join(data_dir, "c_per_fold_metrics_v2.csv")
-specimen_test_csv = os.path.join(data_dir, "c_specimen_level_test_v2.csv")
-predictions_csv = os.path.join(data_dir, "c_predictions_all_models_v2.csv")
-preproc_log_csv = os.path.join(data_dir, "c_preprocessing_audit_log_v2.csv")
-feature_pairs_csv = os.path.join(data_dir, "c_feature_removal_pairs_v2.csv")
+results_csv = os.path.join(data_dir, "c_model_comparison_results.csv")
+per_fold_csv = os.path.join(data_dir, "c_per_fold_metrics.csv")
+specimen_test_csv = os.path.join(data_dir, "c_specimen_level_test.csv")
+predictions_csv = os.path.join(data_dir, "c_predictions_all_models.csv")
+preproc_log_csv = os.path.join(data_dir, "c_preprocessing_audit_log.csv")
+feature_pairs_csv = os.path.join(data_dir, "c_feature_removal_pairs.csv")
 
 TARGET = "HV"
 GROUP_COL = "SPECIMEN"
