@@ -17,13 +17,13 @@ Pipeline:
   (df = K - 1). Holm correction is applied across the pairwise comparisons, and the mean MAE
   difference is reported with its 95% CI.
 
-Outputs (data/, _v2 suffix):
-  c_model_comparison_results_v2.csv  over significance per model
-  c_per_fold_metrics_v2.csv          R2 / RMSE / MAE per model and fold
-  c_specimen_level_test_v2.csv       paired t-test details (per-fold dMAE, CI, p_raw, p_holm)
-  c_predictions_all_models_v2.csv    out-dels
-  c_preprocessing_audit_log_v2.csv   per-fold train/val sizes and removed features
-  c_feature_removal_pairs_v2.csv     feature pairs removed by the collinearity screening
+Outputs (data/):
+  c_model_comparison_results.csv  over significance per model
+  c_per_fold_metrics.csv          R2 / RMSE / MAE per model and fold
+  c_specimen_level_test.csv       paired t-test details (per-fold dMAE, CI, p_raw, p_holm)
+  c_predictions_all_models.csv    out-dels
+  c_preprocessing_audit_log.csv   per-fold train/val sizes and removed features
+  c_feature_removal_pairs.csv     feature pairs removed by the collinearity screening
 No figures are produced.
 """
 import os
